@@ -256,12 +256,6 @@ impl CursorAgentProvider {
         messages: &[Message],
         _tools: &[Tool],
     ) -> Result<Vec<String>, ProviderError> {
-        if !self.get_authentication_status().await {
-            return Err(ProviderError::Authentication(
-                "You are not logged in to cursor-agent. Please run 'cursor-agent login' to authenticate first."
-                    .to_string()));
-        }
-
         let prompt = self.messages_to_cursor_agent_format(system, messages);
 
         if std::env::var("GOOSE_CURSOR_AGENT_DEBUG").is_ok() {
@@ -333,6 +327,11 @@ impl CursorAgentProvider {
         })?;
 
         if !exit_status.success() {
+            if !self.get_authentication_status().await {
+                return Err(ProviderError::Authentication(
+                    "You are not logged in to cursor-agent. Please run 'cursor-agent login' to authenticate first."
+                        .to_string()));
+            }
             return Err(ProviderError::RequestFailed(format!(
                 "Command failed with exit code: {:?}",
                 exit_status.code()
