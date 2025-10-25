@@ -7,8 +7,11 @@ use goose::agents::Agent;
 use goose::agents::{extension::Envs, ExtensionConfig};
 use goose::config::declarative_providers::{create_custom_provider, remove_custom_provider};
 use goose::config::extensions::{
+    disable_extension_group, enable_extension_group, get_all_extension_groups,
     get_all_extension_names, get_all_extensions, get_enabled_extensions, get_extension_by_name,
-    name_to_key, remove_extension, set_extension, set_extension_enabled,
+    get_extension_group_by_name, get_extension_group_state, name_to_key, remove_extension,
+    remove_extension_group, set_extension, set_extension_enabled, set_extension_group,
+    ExtensionGroup, ExtensionGroupState,
 };
 use goose::config::permission::PermissionLevel;
 use goose::config::{Config, ConfigError, ExperimentManager, ExtensionEntry, PermissionManager};
@@ -225,6 +228,11 @@ pub async fn handle_configure() -> Result<(), Box<dyn Error>> {
             )
             .item("remove", "Remove Extension", "Remove an extension")
             .item(
+                "groups",
+                "Extension Groups",
+                "Manage groups of extensions for batch enable/disable",
+            )
+            .item(
                 "settings",
                 "goose settings",
                 "Set the goose mode, Tool Output, Tool Permissions, Experiment, goose recipe github repo and more",
@@ -235,6 +243,7 @@ pub async fn handle_configure() -> Result<(), Box<dyn Error>> {
             "toggle" => toggle_extensions_dialog(),
             "add" => configure_extensions_dialog(),
             "remove" => remove_extension_dialog(),
+            "groups" => configure_extension_groups_dialog(),
             "settings" => configure_settings_dialog().await.and(Ok(())),
             "providers" => configure_provider_dialog().await.and(Ok(())),
             "custom_providers" => configure_custom_provider_dialog(),
@@ -1921,6 +1930,297 @@ fn add_provider() -> Result<(), Box<dyn Error>> {
     )?;
 
     cliclack::outro(format!("Custom provider added: {}", display_name))?;
+    Ok(())
+}
+
+pub fn configure_extension_groups_dialog() -> Result<(), Box<dyn Error>> {
+    let action = cliclack::select("What would you like to do with extension groups?")
+        .item(
+            "list",
+            "List Groups",
+            "View all extension groups and their status",
+        )
+        .item("create", "Create Group", "Create a new extension group")
+        .item("edit", "Edit Group", "Modify an existing extension group")
+        .item("remove", "Remove Group", "Delete an extension group")
+        .item(
+            "toggle",
+            "Toggle Group",
+            "Enable or disable all extensions in a group",
+        )
+        .interact()?;
+
+    match action {
+        "list" => list_extension_groups_dialog(),
+        "create" => create_extension_group_dialog(),
+        "edit" => edit_extension_group_dialog(),
+        "remove" => remove_extension_group_dialog(),
+        "toggle" => toggle_extension_group_dialog(),
+        _ => unreachable!(),
+    }
+}
+
+pub fn list_extension_groups_dialog() -> Result<(), Box<dyn Error>> {
+    let groups = get_all_extension_groups();
+
+    if groups.is_empty() {
+        cliclack::outro("No extension groups configured yet.")?;
+        return Ok(());
+    }
+
+    println!();
+    println!("{}", style("Extension Groups:").bold());
+    println!();
+
+    for group in groups {
+        let key = name_to_key(&group.name);
+        let state = get_extension_group_state(&key).unwrap_or(ExtensionGroupState::Disabled);
+        let state_str = match state {
+            ExtensionGroupState::Enabled => style("✓ Enabled").green(),
+            ExtensionGroupState::Disabled => style("✗ Disabled").red(),
+            ExtensionGroupState::Mixed => style("~ Mixed").yellow(),
+        };
+
+        println!("  {} {}", style(&group.name).bold(), state_str);
+        println!("    Extensions: {}", group.extension_keys.join(", "));
+        println!();
+    }
+
+    cliclack::outro("Extension groups listed successfully")?;
+    Ok(())
+}
+
+pub fn create_extension_group_dialog() -> Result<(), Box<dyn Error>> {
+    let existing_groups: Vec<String> = get_all_extension_groups()
+        .iter()
+        .map(|g| g.name.clone())
+        .collect();
+    let existing_extensions = get_all_extension_names();
+
+    let name: String = cliclack::input("What would you like to call this extension group?")
+        .placeholder("my-group")
+        .validate(move |input: &String| {
+            if input.is_empty() {
+                Err("Please enter a name")
+            } else if existing_groups.contains(input) {
+                Err("An extension group with this name already exists")
+            } else {
+                Ok(())
+            }
+        })
+        .interact()?;
+
+    if existing_extensions.is_empty() {
+        cliclack::outro("No extensions available to add to the group. Add some extensions first.")?;
+        return Ok(());
+    }
+
+    let selected_extensions = cliclack::multiselect(
+        "Select extensions to include in this group: (use \"space\" to toggle and \"enter\" to submit)",
+    )
+    .required(true)
+    .items(
+        &existing_extensions
+            .iter()
+            .map(|name| (name, name.as_str(), ""))
+            .collect::<Vec<_>>(),
+    )
+    .interact()?;
+
+    let group = ExtensionGroup {
+        name: name.clone(),
+        extension_keys: selected_extensions
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+
+    set_extension_group(group);
+    cliclack::outro(format!("Created extension group: {}", style(name).green()))?;
+    Ok(())
+}
+
+pub fn edit_extension_group_dialog() -> Result<(), Box<dyn Error>> {
+    let groups = get_all_extension_groups();
+
+    if groups.is_empty() {
+        cliclack::outro("No extension groups to edit.")?;
+        return Ok(());
+    }
+
+    let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+    let selected_group_name = cliclack::select("Which group would you like to edit?")
+        .items(
+            &group_names
+                .iter()
+                .map(|name| (name, name.as_str(), ""))
+                .collect::<Vec<_>>(),
+        )
+        .interact()?;
+
+    let mut group = get_extension_group_by_name(&selected_group_name)
+        .ok_or_else(|| format!("Group '{}' not found", selected_group_name))?;
+
+    let action = cliclack::select("What would you like to edit?")
+        .item("name", "Change Name", "Rename the group")
+        .item(
+            "extensions",
+            "Modify Extensions",
+            "Add or remove extensions from the group",
+        )
+        .interact()?;
+
+    match action {
+        "name" => {
+            let existing_groups: Vec<String> = get_all_extension_groups()
+                .iter()
+                .map(|g| g.name.clone())
+                .collect();
+            let current_name = group.name.clone();
+            let new_name: String = cliclack::input("Enter new name for the group:")
+                .default_input(&current_name)
+                .validate(move |input: &String| {
+                    if input.is_empty() {
+                        Err("Please enter a name")
+                    } else if input != &current_name && existing_groups.contains(input) {
+                        Err("An extension group with this name already exists")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .interact()?;
+            group.name = new_name;
+        }
+        "extensions" => {
+            let existing_extensions = get_all_extension_names();
+            let selected_extensions = cliclack::multiselect(
+                "Select extensions for this group: (use \"space\" to toggle and \"enter\" to submit)",
+            )
+            .required(true)
+            .items(
+                &existing_extensions
+                    .iter()
+                    .map(|name| (name, name.as_str(), ""))
+                    .collect::<Vec<_>>(),
+            )
+            .initial_values(group.extension_keys.iter().collect())
+            .interact()?;
+            group.extension_keys = selected_extensions
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+        _ => unreachable!(),
+    }
+
+    set_extension_group(group);
+    cliclack::outro(format!(
+        "Updated extension group: {}",
+        style(selected_group_name).green()
+    ))?;
+    Ok(())
+}
+
+pub fn remove_extension_group_dialog() -> Result<(), Box<dyn Error>> {
+    let groups = get_all_extension_groups();
+
+    if groups.is_empty() {
+        cliclack::outro("No extension groups to remove.")?;
+        return Ok(());
+    }
+
+    let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+    let selected_group_name = cliclack::select("Which group would you like to remove?")
+        .items(
+            &group_names
+                .iter()
+                .map(|name| (name, name.as_str(), ""))
+                .collect::<Vec<_>>(),
+        )
+        .interact()?;
+
+    let key = name_to_key(&selected_group_name);
+    remove_extension_group(&key);
+    cliclack::outro(format!(
+        "Removed extension group: {}",
+        style(selected_group_name).green()
+    ))?;
+
+    Ok(())
+}
+
+pub fn toggle_extension_group_dialog() -> Result<(), Box<dyn Error>> {
+    let groups = get_all_extension_groups();
+
+    if groups.is_empty() {
+        cliclack::outro("No extension groups to toggle.")?;
+        return Ok(());
+    }
+
+    let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+    let selected_group_name = cliclack::select("Which group would you like to toggle?")
+        .items(
+            &group_names
+                .iter()
+                .map(|name| {
+                    let key = name_to_key(name);
+                    let state =
+                        get_extension_group_state(&key).unwrap_or(ExtensionGroupState::Disabled);
+                    let state_str = match state {
+                        ExtensionGroupState::Enabled => "✓ Enabled",
+                        ExtensionGroupState::Disabled => "✗ Disabled",
+                        ExtensionGroupState::Mixed => "~ Mixed",
+                    };
+                    let display_name = format!("{} ({})", name, state_str);
+                    (name.clone(), display_name, "")
+                })
+                .collect::<Vec<_>>(),
+        )
+        .interact()?;
+
+    let key = name_to_key(&selected_group_name);
+    let current_state =
+        get_extension_group_state(&key).unwrap_or(ExtensionGroupState::Disabled);
+
+    let action = match current_state {
+        ExtensionGroupState::Enabled => "disable",
+        ExtensionGroupState::Disabled => "enable",
+        ExtensionGroupState::Mixed => {
+            cliclack::select("This group has mixed states. What would you like to do?")
+                .item(
+                    "enable",
+                    "Enable All",
+                    "Enable all extensions in this group",
+                )
+                .item(
+                    "disable",
+                    "Disable All",
+                    "Disable all extensions in this group",
+                )
+                .interact()?
+        }
+    };
+
+    match action {
+        "enable" => {
+            let key = name_to_key(&selected_group_name);
+            enable_extension_group(&key)?;
+            cliclack::outro(format!(
+                "Enabled all extensions in group: {}",
+                style(selected_group_name).green()
+            ))?;
+        }
+        "disable" => {
+            let key = name_to_key(&selected_group_name);
+            disable_extension_group(&key)?;
+            cliclack::outro(format!(
+                "Disabled all extensions in group: {}",
+                style(selected_group_name).green()
+            ))?;
+        }
+        _ => unreachable!(),
+    }
+
     Ok(())
 }
 

@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use goose::config::declarative_providers::LoadedProvider;
+use goose::config::extensions::ExtensionGroup;
 use goose::config::paths::Paths;
 use goose::config::ExtensionEntry;
 use goose::config::{Config, ConfigError};
@@ -34,6 +35,17 @@ pub struct ExtensionQuery {
     pub name: String,
     pub config: ExtensionConfig,
     pub enabled: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ExtensionGroupsResponse {
+    pub groups: Vec<ExtensionGroup>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ExtensionGroupQuery {
+    pub name: String,
+    pub extensions: Vec<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -232,6 +244,69 @@ pub async fn remove_extension(Path(name): Path<String>) -> Result<Json<String>, 
     let key = goose::config::extensions::name_to_key(&name);
     goose::config::remove_extension(&key);
     Ok(Json(format!("Removed extension {}", name)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/config/groups",
+    responses(
+        (status = 200, description = "All extension groups retrieved successfully", body = ExtensionGroupsResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn get_extension_groups() -> Result<Json<ExtensionGroupsResponse>, StatusCode> {
+    let groups = goose::config::extensions::get_all_extension_groups();
+    Ok(Json(ExtensionGroupsResponse { groups }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/config/groups",
+    request_body = ExtensionGroupQuery,
+    responses(
+        (status = 200, description = "Extension group added or updated successfully", body = String),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn add_extension_group(
+    Json(extension_group_query): Json<ExtensionGroupQuery>,
+) -> Result<Json<String>, StatusCode> {
+    let groups = goose::config::extensions::get_all_extension_groups();
+    let key = goose::config::extensions::name_to_key(&extension_group_query.name);
+    let is_update = groups
+        .iter()
+        .any(|group| group.key() == key);
+    goose::config::extensions::set_extension_group(ExtensionGroup {
+        name: extension_group_query.name.clone(),
+        extension_keys: extension_group_query.extensions,
+    });
+    if is_update {
+        Ok(Json(format!(
+            "Updated extension group {}",
+            extension_group_query.name
+        )))
+    } else {
+        Ok(Json(format!(
+            "Added extension group {}",
+            extension_group_query.name
+        )))
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/config/groups/{name}",
+    responses(
+        (status = 200, description = "Extension group removed successfully", body = String),
+        (status = 404, description = "Extension group not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn remove_extension_group(Path(name): Path<String>) -> Result<Json<String>, StatusCode> {
+    let key = goose::config::extensions::name_to_key(&name);
+    goose::config::extensions::remove_extension_group(&key);
+    Ok(Json(format!("Removed extension group {}", name)))
 }
 
 #[utoipa::path(
@@ -716,6 +791,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/config/extensions", get(get_extensions))
         .route("/config/extensions", post(add_extension))
         .route("/config/extensions/{name}", delete(remove_extension))
+        .route("/config/groups", get(get_extension_groups))
+        .route("/config/groups/{name}", delete(remove_extension_group))
+        .route("/config/groups", post(add_extension_group))
         .route("/config/providers", get(providers))
         .route("/config/providers/{name}/models", get(get_provider_models))
         .route("/config/pricing", post(get_pricing))
@@ -762,4 +840,5 @@ mod tests {
         assert!(gpt4_limit.is_some());
         assert_eq!(gpt4_limit.unwrap().context_limit, 128_000);
     }
+
 }
